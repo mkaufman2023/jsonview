@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jsonview"
+version = "0.1.0"
+description = "A fast, lazy-loading JSON viewer for Windows 11 built on tkinter"
+requires-python = ">=3.12"
+dependencies = [
+    "sv-ttk>=2.6",        # Windows 11 (Sun Valley) theme for ttk
+    "tkinterdnd2>=0.4",   # drag-and-drop files onto the window
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+# gui-scripts: on Windows this creates jsonview.exe that starts without a console window
+[project.gui-scripts]
+jsonview = "jsonview.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+jsonview = ["assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

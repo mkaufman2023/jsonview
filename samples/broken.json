@@ -1,0 +1,7 @@
+{
+  "name": "AHU-1",
+  "points": [
+    {"name": "SAT", "value": 55.4}
+    {"name": "RAT", "value": 72.0}
+  ]
+}
