@@ -8,7 +8,7 @@ Windows 11 (Sun Valley) theme. A rewrite of the idea behind `PyJSONViewer`.
 1. Check that your Python has tkinter. A small test window should open:
 
    ```bash
-   py -3.13 -c "import tkinter; tkinter._test()"
+   python -c "import tkinter; tkinter._test()"
    ```
 
    If you get `ModuleNotFoundError: No module named 'tkinter'`, rerun the
@@ -18,7 +18,7 @@ Windows 11 (Sun Valley) theme. A rewrite of the idea behind `PyJSONViewer`.
    immediately without reinstalling:
 
    ```bash
-   py -3.13 -m pip install -e .
+   python -m pip install -e .
    ```
 
    This installs `sv-ttk` (theme) and `tkinterdnd2` (drag and drop), 
