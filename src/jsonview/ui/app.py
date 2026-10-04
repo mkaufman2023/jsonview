@@ -32,7 +32,7 @@ try:
 except ImportError:
     TkinterDnD = DND_FILES = None
 
-APP_NAME = "JSON Viewer"
+APP_NAME = "jsonview"
 ASSETS = FilePath(__file__).resolve().parent.parent / "assets"
 FILETYPES = [("JSON files", "*.json *.jsonl *.ndjson *.geojson"), ("All files", "*.*")]
 MAX_MATCHES = 10_000

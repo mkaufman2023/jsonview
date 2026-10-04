@@ -73,7 +73,7 @@ def show_about(parent: tk.Misc, session) -> None:
     from .theme import sv_ttk
 
     lines = [
-        f"JSON Viewer {__version__}",
+        f"jsonview {__version__}",
         "",
         f"Python {platform.python_version()}, Tcl/Tk {parent.tk.call('info', 'patchlevel')}",
         f"Windows 11 theme: {'on (sv-ttk)' if sv_ttk else 'not installed'}",
@@ -81,4 +81,4 @@ def show_about(parent: tk.Misc, session) -> None:
         "",
         f"Settings: {SETTINGS_FILE}",
     ]
-    messagebox.showinfo("About JSON Viewer", "\n".join(lines), parent=parent)
+    messagebox.showinfo("About jsonview", "\n".join(lines), parent=parent)

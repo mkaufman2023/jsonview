@@ -8,7 +8,7 @@ import traceback
 from pathlib import Path
 
 TK_MISSING = (
-    "This Python doesn't include tkinter, which JSON Viewer needs.\n\n"
+    "This Python doesn't include tkinter, which `jsonview` needs.\n\n"
     "Run the Python installer again, choose Modify, and make sure "
     '"tcl/tk and IDLE" is checked. Then try again.\n\n'
     "To check: python -c \"import tkinter; tkinter._test()\""
@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         run(source, theme=args.theme)
     except Exception:  # jsonview.exe has no console, so show startup failures instead of vanishing
-        _fatal("JSON Viewer couldn't start.\n\n" + traceback.format_exc(limit=6))
+        _fatal("jsonview couldn't start.\n\n" + traceback.format_exc(limit=6))
         return 1
     return 0
 

@@ -77,7 +77,7 @@ class Settings:
         return settings
 
     def save(self) -> None:
-        """Write settings, merging recent files saved meanwhile by other JSON Viewer windows."""
+        """Write settings, merging recent files saved meanwhile by other jsonview windows."""
         try:
             on_disk = Settings.load()
             mine = {os.path.normcase(p) for p in self.recent}
