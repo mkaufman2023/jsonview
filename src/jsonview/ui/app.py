@@ -17,7 +17,7 @@ from typing import Any
 
 from ..core import formatting as fmt
 from ..core.loader import Document, LoadError, load_file, load_text
-from ..core.model import Bucket, Entry, Kind, Row, count_nodes, iter_node_count, resolve
+from ..core.model import Bucket, Entry, Kind, Row, count_nodes, iter_node_count, kind_of, resolve
 from ..core.paths import PathStyle, format_path, to_jsonpath
 from ..core.search import Query, iter_matches
 from ..settings import Settings
@@ -38,6 +38,7 @@ FILETYPES = [("JSON files", "*.json *.jsonl *.ndjson *.geojson"), ("All files", 
 MAX_MATCHES = 10_000
 EXPAND_CONFIRM_NODES = 20_000
 SEARCH_DELAY_MS = 250
+DETAIL_DELAY_MS = 40  # holding an arrow key renders the details pane once, when you stop
 WORK_SLICE_S = 0.015  # how long background-ish work may hold the UI per step
 
 # Segoe Fluent Icons glyphs (Windows 11), with text fallbacks for other systems
@@ -75,13 +76,16 @@ def _bind_letter(widget: tk.Misc, mods: str, letter: str, handler: Callable) -> 
 class Session:
     """State shared by every window in the process: settings, theme, drag-and-drop support."""
 
-    def __init__(self, root: tk.Tk, settings: Settings, dnd: bool) -> None:
+    def __init__(self, root: tk.Tk, settings: Settings, dnd: bool, theme: str | None = None) -> None:
         self.root = root
         self.settings = settings
         self.dnd = dnd
         self.windows: list[ViewerWindow] = []
         root.report_callback_exception = self._report_exception
-        self.theme = ThemeManager(root, settings.theme)
+        # A theme passed in (--theme, view(theme=...)) applies to this session only.
+        self.theme = ThemeManager(root, theme or settings.theme)
+        self._initial_theme = self.theme.mode
+        self.auto_reload_var = tk.BooleanVar(root, settings.auto_reload)  # shared by every window
         self._set_icon()
 
     def _set_icon(self) -> None:
@@ -98,14 +102,18 @@ class Session:
         """Show unexpected errors instead of losing them (there's no console under jsonview.exe)."""
         details = "".join(traceback.format_exception(exc_type, exc, tb))
         print(details, file=sys.stderr)
-        messagebox.showerror(APP_NAME, f"Something went wrong:\n\n{exc}\n\n{details[-1500:]}")
+        try:
+            messagebox.showerror(APP_NAME, f"Something went wrong:\n\n{exc}\n\n{details[-1500:]}")
+        except tk.TclError:  # the app is already shutting down
+            pass
 
     def new_window(self, doc: Document | None = None) -> ViewerWindow:
+        anchor = self.windows[0].win if self.windows else self.root
+        offset = 40 * (1 + len(self.windows) % 6)  # cascade, so new windows don't hide each other
         top = tk.Toplevel(self.root)
         window = ViewerWindow(top, self, is_main=False)
-        main = self.windows[0].win if self.windows else self.root
-        x, y = main.winfo_rootx() + 40, main.winfo_rooty() + 40
-        top.geometry(f"{main.winfo_width()}x{main.winfo_height()}+{x}+{y}")
+        x, y = anchor.winfo_rootx() + offset, anchor.winfo_rooty() + offset
+        top.geometry(f"{anchor.winfo_width()}x{anchor.winfo_height()}+{x}+{y}")
         if doc is not None:
             window.show_document(doc)
         self.theme.style_window(top)
@@ -114,8 +122,16 @@ class Session:
     def quit(self) -> None:
         for window in list(self.windows):
             window.save_layout()
-        self.settings.theme = self.theme.mode
+        if self.theme.mode != self._initial_theme:  # changed in the app, so remember it
+            self.settings.theme = self.theme.mode
         self.settings.save()
+        for window in list(self.windows):
+            window.shutdown()
+        self.theme.stop()
+        # Cancel every pending timer, so nothing fires into a destroyed app (or into the
+        # next one, when view() is called again from the same Python session).
+        for job in self.root.tk.splitlist(self.root.tk.call("after", "info")):
+            self.root.after_cancel(job)
         self.root.destroy()
 
 
@@ -146,6 +162,10 @@ class ViewerWindow:
         self._search_truncated = False
         self._matches: list = []
         self._match_index = -1
+        self._detail_job: str | None = None
+        self._menu: tk.Menu | None = None
+        self._banner_error: tuple[LoadError, FilePath | None] | None = None
+        self._loaded_at = ""
 
         win.title(APP_NAME)
         scale = win.winfo_fpixels("1i") / 96.0
@@ -158,7 +178,7 @@ class ViewerWindow:
         self.keys_var = tk.BooleanVar(win, True)
         self.values_var = tk.BooleanVar(win, True)
         self.details_var = tk.BooleanVar(win, self.settings.show_details)
-        self.auto_reload_var = tk.BooleanVar(win, self.settings.auto_reload)
+        self.auto_reload_var = session.auto_reload_var
         self.theme_var = tk.StringVar(win, self.theme.mode)
 
         self._build_menu()
@@ -290,8 +310,19 @@ class ViewerWindow:
     def _build_body(self) -> None:
         self.body = ttk.Frame(self.win)
         self.body.grid(row=2, column=0, sticky="nsew")
-        self.body.rowconfigure(0, weight=1)
+        self.body.rowconfigure(1, weight=1)
         self.body.columnconfigure(0, weight=1)
+
+        # Shown above the document when a reload or paste fails, so the document stays put.
+        # Plain tk widgets: ttk labels repaint their background with the theme default.
+        self.banner = tk.Frame(self.body, padx=12, pady=7, borderwidth=0, highlightthickness=0)
+        self.banner_label = tk.Label(self.banner, anchor="w", justify="left", font=self.theme.fonts.ui, borderwidth=0)
+        self.banner_label.pack(side="left", fill="x", expand=True)
+        ttk.Button(self.banner, text="Show details", style="Banner.TButton",
+                   command=self._banner_details).pack(side="right", padx=(12, 0))
+        self.banner.bind("<Configure>", lambda e: self.banner_label.configure(wraplength=max(200, e.width - 160)))
+        self.banner.grid(row=0, column=0, sticky="ew")
+        self.banner.grid_remove()
 
         self.panes = ttk.Panedwindow(self.body, orient="horizontal")
         self.tree = JsonTree(self.panes, on_select=self._on_select)
@@ -301,8 +332,8 @@ class ViewerWindow:
         if self.details_var.get():
             self.panes.add(self.detail, weight=2)
         self.placeholder = ttk.Frame(self.body)
-        self.panes.grid(row=0, column=0, sticky="nsew")
-        self.placeholder.grid(row=0, column=0, sticky="nsew")
+        self.panes.grid(row=1, column=0, sticky="nsew")
+        self.placeholder.grid(row=1, column=0, sticky="nsew")
 
         tv = self.tree.tv
         tv.bind("<Button-3>", self._on_right_click)
@@ -348,7 +379,8 @@ class ViewerWindow:
 
         def restore() -> None:
             self._flash_job = None
-            self.status_left.configure(text=self._status_text)
+            if self.alive:
+                self.status_left.configure(text=self._status_text)
 
         self._flash_job = self._after(2200, restore)
 
@@ -387,6 +419,8 @@ class ViewerWindow:
         if not self.alive:
             return
         self.win.configure(background=p.window)
+        self.banner.configure(background=p.match)
+        self.banner_label.configure(background=p.match, foreground=p.text)
         self.tree.apply_palette(p)
         self.detail.apply_palette(p)
         glyph, fallback = ICONS["sun" if p.dark else "moon"]
@@ -411,17 +445,27 @@ class ViewerWindow:
         if path:
             self.open_path(path)
 
-    def open_path(self, path: str | os.PathLike, state: TreeState | None = None) -> None:
+    def open_path(self, path: str | os.PathLike, state: TreeState | None = None, *, reloading: bool = False) -> None:
         file = FilePath(path)
         self._busy(f"Opening {file.name}…")
         try:
             doc = load_file(file)
         except LoadError as err:
-            if file.exists():
-                self.settings.add_recent(file.resolve())
+            exists = file.is_file()
+            if exists:
+                self.settings.add_recent(file.absolute())
             else:
                 self.settings.remove_recent(str(path))
-            self.show_error(err, file=file if file.exists() else None)
+            if reloading and self.doc is not None and exists:
+                # Keep showing the last good version (handy while the file is mid-edit);
+                # the next change to the file triggers another try.
+                self._watch(file)
+                where = f" at {err.location}" if err.location else ""
+                self._show_banner(
+                    f"Couldn't reload {file.name}: {err.message.rstrip('.')}{where}. "
+                    f"Showing the version opened at {self._loaded_at}.", err, file)
+                return
+            self.show_error(err, file=file if exists else None)
             return
         finally:
             self._busy(None)
@@ -438,7 +482,13 @@ class ViewerWindow:
         try:
             doc = load_text(text, source="Clipboard")
         except LoadError as err:
-            self.show_error(err)
+            if self.doc is not None:  # don't throw away the open document over a stray Ctrl+V
+                where = f" at {err.location}" if err.location else ""
+                self._show_banner(
+                    f"The clipboard text isn't valid JSON: {err.message.rstrip('.')}{where}. "
+                    "The open document wasn't replaced.", err, None)
+            else:
+                self.show_error(err)
             return
         self.show_document(doc)
 
@@ -458,7 +508,7 @@ class ViewerWindow:
 
     def reload(self) -> None:
         if self.doc is not None and self.doc.file is not None:
-            self.open_path(self.doc.file, state=self.tree.capture_state())
+            self.open_path(self.doc.file, state=self.tree.capture_state(), reloading=True)
         elif self._error is not None and self._watch_path is not None:
             self.open_path(self._watch_path)
 
@@ -470,6 +520,8 @@ class ViewerWindow:
     def show_document(self, doc: Document, state: TreeState | None = None) -> None:
         self.doc = doc
         self._error = None
+        self._loaded_at = time.strftime("%H:%M:%S")
+        self._hide_banner()
         self.tree.load(doc.data)
         if state is not None:
             self.tree.restore_state(state)
@@ -514,6 +566,7 @@ class ViewerWindow:
     def show_error(self, err: LoadError, file: FilePath | None = None) -> None:
         self.doc = None
         self._error = err
+        self._hide_banner()
         self._count_token += 1
         self.tree.clear()
         self.detail.show(None)
@@ -547,6 +600,7 @@ class ViewerWindow:
         ttk.Button(buttons, text="Open another file…", command=self.open_dialog).pack(side="left")
 
     def show_welcome(self) -> None:
+        self._hide_banner()
         inner = self._fresh_placeholder()
         ttk.Label(inner, text="{ }", style="Display.TLabel").pack(anchor="w")
         ttk.Label(inner, text="Open a JSON file", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 4))
@@ -579,6 +633,20 @@ class ViewerWindow:
         inner.place(relx=0.5, rely=0.42, anchor="center")
         return inner
 
+    def _show_banner(self, message: str, err: LoadError, file: FilePath | None) -> None:
+        self._banner_error = (err, file)
+        self.banner_label.configure(text=message)
+        self.banner.grid()
+
+    def _hide_banner(self) -> None:
+        self._banner_error = None
+        self.banner.grid_remove()
+
+    def _banner_details(self) -> None:
+        if self._banner_error is not None:
+            err, file = self._banner_error
+            self.show_error(err, file=file)
+
     def _show_body(self, widget: tk.Widget) -> None:
         """Both views share one grid cell; the visible one is simply raised above the other."""
         widget.tkraise()
@@ -604,7 +672,7 @@ class ViewerWindow:
         menu.add_command(label="Clear list", command=self._clear_recent)
 
     def _clear_recent(self) -> None:
-        self.settings.recent.clear()
+        self.settings.clear_recent()
         if self.doc is None and self._error is None:
             self.show_welcome()
 
@@ -645,8 +713,16 @@ class ViewerWindow:
     # Selection, menus, activation
     # ======================================================================
 
-    def _on_select(self, row: Row | None) -> None:
-        self.detail.show(row, self.doc.data if self.doc else None)
+    def _on_select(self, _row: Row | None) -> None:
+        # Rendering a big value takes a moment, so wait until the selection stops changing.
+        if self._detail_job:
+            self._cancel(self._detail_job)
+        self._detail_job = self._after(DETAIL_DELAY_MS, self._render_detail)
+
+    def _render_detail(self) -> None:
+        self._detail_job = None
+        if self.alive:
+            self.detail.show(self.tree.selected_row(), self.doc.data if self.doc else None)
 
     def _selected_entry(self) -> Entry | None:
         row = self.tree.selected_row()
@@ -673,7 +749,9 @@ class ViewerWindow:
         row = self.tree.row(iid) if iid else None
         if row is None:
             return
-        menu = tk.Menu(self.win, tearoff=False)
+        if self._menu is not None:  # replace, rather than pile up, menu widgets
+            self._menu.destroy()
+        self._menu = menu = tk.Menu(self.win, tearoff=False)
         if isinstance(row, Entry):
             menu.add_command(label="Copy value", accelerator="Ctrl+C", command=self.copy_value)
             if row.key is not None:
@@ -722,10 +800,21 @@ class ViewerWindow:
         self.win.clipboard_append(text)
         self.flash(message)
 
+    def _copy_formatted(self, value: Any, kind: Kind, message: str) -> None:
+        try:
+            if kind in (Kind.OBJECT, Kind.ARRAY):
+                text = self._with_busy_cursor(lambda: fmt.copy_text(value, kind))
+            else:
+                text = fmt.copy_text(value, kind)
+        except RecursionError:
+            self.flash("That value is nested too deeply to copy as text.")
+            return
+        self._to_clipboard(text, message)
+
     def copy_value(self) -> None:
         entry = self._selected_entry()
         if entry is not None:
-            self._to_clipboard(fmt.copy_text(entry.value, entry.kind), "Copied value")
+            self._copy_formatted(entry.value, entry.kind, "Copied value")
 
     def copy_key(self) -> None:
         entry = self._selected_entry()
@@ -739,7 +828,7 @@ class ViewerWindow:
 
     def copy_document(self) -> None:
         if self.doc is not None:
-            self._to_clipboard(fmt.to_json(self.doc.data), "Copied the whole document")
+            self._copy_formatted(self.doc.data, kind_of(self.doc.data), "Copied the whole document")
 
     # ======================================================================
     # Expand / collapse
@@ -755,11 +844,11 @@ class ViewerWindow:
             parent=self.win,
         )
 
-    def _with_busy_cursor(self, action: Callable[[], None]) -> None:
+    def _with_busy_cursor(self, action: Callable[[], Any]) -> Any:
         self.win.configure(cursor="watch")
         self.win.update_idletasks()
         try:
-            action()
+            return action()
         finally:
             self.win.configure(cursor="")
 
@@ -819,6 +908,8 @@ class ViewerWindow:
         if self._search_after:
             self._cancel(self._search_after)
             self._search_after = None
+        if not self.alive:
+            return
         self._reset_search()
         text = self._searched_text = self.search_entry.value
         if not text or self.doc is None:
@@ -923,7 +1014,9 @@ class ViewerWindow:
         s, w = self.settings, self.win
         scale = w.winfo_fpixels("1i") / 96.0
         geometry = s.geometry
-        m = re.fullmatch(r"(\d+)x(\d+)([+-]-?\d+)([+-]-?\d+)", geometry or "")
+        # Tk writes positions left of / above the primary monitor as "+-1500", and a
+        # minimized window as "+-32000+-32000"; the on-screen check rejects the latter.
+        m = re.fullmatch(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", geometry or "")
         if m and winapi.point_on_screen(w, int(m.group(3)) + 40, int(m.group(4)) + 10):
             w.geometry(geometry)
         else:
@@ -937,42 +1030,72 @@ class ViewerWindow:
             except tk.TclError:
                 pass
 
+        attempts = 0
+
         def place_sash() -> None:
+            nonlocal attempts
+            if not self.alive:
+                return
             total = self.panes.winfo_width()
-            if total <= 1:  # not laid out yet
-                self._after(60, place_sash)
+            if total <= 1:  # not laid out yet (or started minimized): try again, but not forever
+                attempts += 1
+                if attempts < 50:
+                    self._after(60, place_sash)
                 return
             if self._details_shown():
                 width = s.details_width or round(total * 0.38)
                 self.panes.sashpos(0, max(round(240 * scale), total - width))
 
-        w.after(80, place_sash)
+        self._after(80, place_sash)
 
     def save_layout(self) -> None:
         if not self.is_main or not self.alive:
             return
         s, w = self.settings, self.win
         try:
-            s.maximized = w.state() == "zoomed"
+            state = w.state()
+            if state in ("iconic", "withdrawn"):  # minimized: size and position aren't meaningful
+                return
+            s.maximized = state == "zoomed"
             if not s.maximized:
                 s.geometry = w.geometry()
             if self._details_shown():
-                s.details_width = self.panes.winfo_width() - self.panes.sashpos(0)
+                total = self.panes.winfo_width()
+                width = total - self.panes.sashpos(0)
+                if 0 < width < total:
+                    s.details_width = width
         except tk.TclError:
             pass
 
-    def close(self) -> None:
-        if self.is_main:
-            self.session.quit()
+    def shutdown(self) -> None:
+        """Stop this window's timers and detach it from the session."""
+        if not self.alive:
             return
         self.alive = False
         self._search_token += 1
         self._count_token += 1
+        for job in (self._flash_job, self._search_after, self._detail_job):
+            if job:
+                self._cancel(job)
+        self._flash_job = self._search_after = self._detail_job = None
         if self._apply_palette in self.theme.listeners:
             self.theme.listeners.remove(self._apply_palette)
         if self in self.session.windows:
             self.session.windows.remove(self)
-        self.win.destroy()
+
+    def close(self) -> None:
+        """Close this window. The app exits when the last window closes."""
+        if not any(w is not self for w in self.session.windows):
+            self.session.quit()
+        elif self.is_main:
+            # The main window is the Tk root and can't be destroyed without closing
+            # everything, so it's hidden while other windows stay open.
+            self.save_layout()
+            self.shutdown()
+            self.win.withdraw()
+        else:
+            self.shutdown()
+            self.win.destroy()
 
 
 # ==========================================================================
@@ -984,20 +1107,25 @@ def create_root() -> tuple[tk.Tk, bool]:
     winapi.enable_dpi_awareness()
     winapi.set_app_id()
     if TkinterDnD is not None and not os.environ.get("JSONVIEW_NO_DND"):
+        before = getattr(tk, "_default_root", None)
         try:
             return TkinterDnD.Tk(), True
-        except (RuntimeError, tk.TclError):
-            pass
+        except Exception:  # tkdnd failed to load: carry on without drag and drop
+            # TkinterDnD.Tk() creates the window before loading tkdnd; don't leave it behind.
+            stray = getattr(tk, "_default_root", None)
+            if stray is not None and stray is not before:
+                try:
+                    stray.destroy()
+                except tk.TclError:
+                    pass
     return tk.Tk(), False
 
 
 def run(source: Document | LoadError | str | os.PathLike | None = None, *, theme: str | None = None) -> None:
     settings = Settings.load()
-    if theme:
-        settings.theme = theme
     root, dnd = create_root()
     root.withdraw()  # stay hidden until themed and sized, so there's no flash of an unstyled window
-    session = Session(root, settings, dnd)
+    session = Session(root, settings, dnd, theme=theme)
     window = ViewerWindow(root, session, is_main=True)
     window.restore_layout()
     root.deiconify()

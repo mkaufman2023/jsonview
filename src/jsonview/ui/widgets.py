@@ -18,6 +18,7 @@ class Tooltip:
         widget.bind("<Enter>", self._schedule, add="+")
         widget.bind("<Leave>", self._hide, add="+")
         widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<Destroy>", self._hide, add="+")  # don't leave a pending timer on a dead widget
 
     def _schedule(self, _event=None) -> None:
         self._cancel()

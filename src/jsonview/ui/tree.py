@@ -10,7 +10,7 @@ from typing import Any
 
 from ..core import formatting as fmt
 from ..core.model import (
-    Bucket, Entry, Path, Row, bucket_key_range, is_container, path_exists,
+    DIRECT_LIMIT, Bucket, Entry, Path, Row, bucket_key_ranges, is_container, path_exists,
     plan_children, resolve, root_entry,
 )
 from .theme import Palette
@@ -74,6 +74,7 @@ class JsonTree(ttk.Frame):
         self._placeholders: set[str] = set()
         self._match_paths: frozenset[Path] = frozenset()
         self._matched_iids: set[str] = set()
+        self._key_lists: dict[Path, list] = {}  # key order of big objects, so ranges slice cheaply
         self._key_positions: dict[Path, dict[Any, int]] = {}
 
     def clear(self) -> None:
@@ -88,8 +89,7 @@ class JsonTree(ttk.Frame):
         self.loaded = True
         self._populated.add("")
         if is_container(data) and len(data) > 0:
-            for row in plan_children(data, ()):
-                self._insert("", row)
+            self._insert_children("", data, ())
         else:  # a scalar or empty document still gets one visible row
             self._insert("", root_entry(data))
         first = self.tv.get_children("")
@@ -98,13 +98,27 @@ class JsonTree(ttk.Frame):
 
     # --- rows ----------------------------------------------------------------
 
-    def _insert(self, parent: str, row: Row) -> str:
+    def _keys(self, container: Any, path: Path) -> list | None:
+        if isinstance(container, Mapping) and len(container) > DIRECT_LIMIT:
+            keys = self._key_lists.get(path)
+            if keys is None:
+                keys = self._key_lists[path] = list(container.keys())
+            return keys
+        return None
+
+    def _insert_children(self, parent: str, container: Any, path: Path, start: int = 0, stop: int | None = None) -> None:
+        keys = self._keys(container, path)
+        rows = plan_children(container, path, start, stop, keys=keys)
+        buckets = [r for r in rows if isinstance(r, Bucket)]
+        labels = iter(bucket_key_ranges(container, buckets, keys))
+        for row in rows:
+            self._insert(parent, row, next(labels) if isinstance(row, Bucket) else "")
+
+    def _insert(self, parent: str, row: Row, bucket_label: str = "") -> str:
         tv = self.tv
         if isinstance(row, Bucket):
-            container = resolve(self.data, row.path)
             iid = tv.insert(
-                parent, "end", text=row.label,
-                values=(bucket_key_range(container, row), "range"), tags=("bucket",),
+                parent, "end", text=row.label, values=(bucket_label, "range"), tags=("bucket",),
             )
             self._add_placeholder(iid)
         else:
@@ -138,13 +152,9 @@ class JsonTree(ttk.Frame):
                 self._placeholders.discard(child)
         row = self._rows.get(iid)
         if isinstance(row, Bucket):
-            rows = plan_children(resolve(self.data, row.path), row.path, row.start, row.stop)
+            self._insert_children(iid, resolve(self.data, row.path), row.path, row.start, row.stop)
         elif isinstance(row, Entry) and row.is_container:
-            rows = plan_children(row.value, row.path)
-        else:
-            rows = []
-        for child in rows:
-            self._insert(iid, child)
+            self._insert_children(iid, row.value, row.path)
 
     def _on_open(self, _event=None) -> None:
         # Tk focuses the item before firing <<TreeviewOpen>>, for both mouse and keyboard.
@@ -210,7 +220,8 @@ class JsonTree(ttk.Frame):
         if isinstance(container, Mapping):
             positions = self._key_positions.get(container_path)
             if positions is None:
-                positions = self._key_positions[container_path] = {k: i for i, k in enumerate(container)}
+                keys = self._keys(container, container_path) or list(container)
+                positions = self._key_positions[container_path] = {k: i for i, k in enumerate(keys)}
             pos = positions.get(key)
         else:
             pos = key if isinstance(key, int) and 0 <= key < len(container) else None

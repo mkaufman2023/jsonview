@@ -58,7 +58,8 @@ class Fonts:
         self.strong = pick("SunValleyBodyStrongFont", "TkDefaultFont")
         self.caption = pick("SunValleyCaptionFont", "TkSmallCaptionFont")
         self.subtitle = pick("SunValleySubtitleFont", "TkHeadingFont")
-        mono = next((f for f in MONO_FAMILIES if f in families), "TkFixedFont")
+        mono = next((f for f in MONO_FAMILIES if f in families), None)
+        mono = mono or tkfont.nametofont("TkFixedFont", root=root).actual("family")
         self.mono = tkfont.Font(root=root, family=mono, size=10)
         self.display = tkfont.Font(root=root, family=mono, size=34)
         icon_family = next((f for f in ICON_FAMILIES if f in families), None)
@@ -89,6 +90,7 @@ class ThemeManager:
         self.root = root
         self.mode = mode if mode in ("system", "light", "dark") else "system"
         self.listeners: list[Callable[[Palette], None]] = []
+        self._stopped = False
         self._dark = self._resolve_dark()
         self._set_ttk_theme()
         _scale_pixel_fonts(root)
@@ -96,10 +98,6 @@ class ThemeManager:
         self.palette = self._build_palette()
         self._configure_styles()
         self._poll_system()
-
-    @property
-    def available(self) -> bool:
-        return sv_ttk is not None
 
     def _resolve_dark(self) -> bool:
         if sv_ttk is None:
@@ -125,7 +123,8 @@ class ThemeManager:
         p, f = self.palette, self.fonts
         style = ttk.Style(self.root)
         scale = self.root.winfo_fpixels("1i") / 96.0
-        style.configure("Treeview", rowheight=f.ui.metrics("linespace") + round(10 * scale), font=f.ui)
+        style.configure("Treeview", rowheight=f.ui.metrics("linespace") + round(10 * scale), font=f.ui,
+                        indent=round(20 * scale))
         style.configure("Treeview.Heading", font=f.strong)
         style.configure("Muted.TLabel", foreground=p.muted)
         style.configure("Caption.TLabel", foreground=p.muted, font=f.caption)
@@ -137,9 +136,9 @@ class ThemeManager:
         style.configure("Code.TLabel", font=f.mono, foreground=p.text)
         style.configure("CodeCaret.TLabel", font=f.mono, foreground=p.error)
         style.configure("Placeholder.TEntry", foreground=p.muted)
+        style.configure("Banner.TButton", background=p.match)  # so rounded corners blend in
         if f.icon is not None:
             style.configure("Icon.Toolbutton", font=f.icon)
-        style.configure("Status.TFrame", background=p.window)
 
     def set_mode(self, mode: str) -> None:
         self.mode = mode
@@ -161,13 +160,16 @@ class ThemeManager:
 
     def _poll_system(self) -> None:
         """Follow Windows' app mode live while the theme is set to "system"."""
+        if self._stopped:
+            return
         if self.mode == "system":
             self.refresh()
-        try:
-            self.root.after(2000, self._poll_system)
-        except tk.TclError:
-            pass
+        self.root.after(2000, self._poll_system)
+
+    def stop(self) -> None:
+        self._stopped = True
+        self.listeners.clear()
 
     def style_window(self, window: tk.Misc) -> None:
         p = self.palette
-        winapi.style_title_bar(window, dark=p.dark, caption=p.window, text=p.text)
+        winapi.style_title_bar(window, dark=p.dark, caption=p.window)

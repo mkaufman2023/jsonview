@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 from pathlib import Path
 
 TK_MISSING = (
@@ -39,19 +40,25 @@ def main(argv: list[str] | None = None) -> int:
         _fatal(TK_MISSING)
         return 1
 
-    from .core.loader import LoadError, load_text
+    from .core.loader import LoadError, decode_bytes, load_text
     from .ui.app import run
 
     source = None
     if args.file == "-":
-        text = sys.stdin.read() if sys.stdin else ""
+        # Read bytes and detect the encoding ourselves: Python would otherwise decode piped
+        # input with the console code page (cp1252), garbling UTF-8 text such as "°F".
+        raw = sys.stdin.buffer.read() if sys.stdin is not None else b""
         try:
-            source = load_text(text, source="Standard input")
+            source = load_text(decode_bytes(raw)[0], source="Standard input")
         except LoadError as err:
             source = err
     elif args.file:
         source = Path(args.file)
-    run(source, theme=args.theme)
+    try:
+        run(source, theme=args.theme)
+    except Exception:  # jsonview.exe has no console, so show startup failures instead of vanishing
+        _fatal("JSON Viewer couldn't start.\n\n" + traceback.format_exc(limit=6))
+        return 1
     return 0
 
 

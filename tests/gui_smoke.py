@@ -136,7 +136,8 @@ w.collapse_all(); pump(0.1)
 root.clipboard_clear(); root.clipboard_append('{"pasted": [1, 2, {"ok": true}]}'); w.open_clipboard(); pump()
 check(w.win.title().startswith("Clipboard") and w.doc.data["pasted"][2]["ok"] is True, "open from clipboard")
 root.clipboard_clear(); root.clipboard_append('{"pasted": [1, 2,'); w.open_clipboard(); pump()
-check(w._error is not None and w.doc is None, "invalid clipboard JSON shows the error view")
+check(w.doc is not None and w.doc.data["pasted"][2]["ok"] is True and w.banner.winfo_ismapped(),
+      "invalid clipboard JSON keeps the open document and shows a banner")
 
 # broken file
 w.open_path("samples/broken.json"); pump()
@@ -174,9 +175,172 @@ pump(1.0)
 parts = [c.cget("text") for c in w.status_right.winfo_children() if isinstance(c, A.ttk.Label)]
 check(any("values" in p for p in parts), f"status parts {parts}")
 
+
+# ---------------------------------------------------------------------------
+# Review fixes, within the main session
+# ---------------------------------------------------------------------------
+errors_reported = []
+session._report_exception = lambda *exc: errors_reported.append(exc[1])
+root.report_callback_exception = session._report_exception
+
+# Real keyboard and mouse expansion (not just reveal()), which relies on Tk focusing the item first
+w.open_path("samples/ahu_points.json"); pump()
+tv = w.tree.tv
+eq = w.tree.reveal(("equipment",))
+w.tree.collapse(""); tv.selection_set(eq); tv.focus(eq); tv.focus_force(); pump(0.2)
+tv.event_generate("<Right>"); pump(0.2)
+check(w.tree.is_open(eq) and len(tv.get_children(eq)) == 2, "Right arrow expands and populates a row")
+first = tv.get_children(eq)[0]
+tv.see(first); pump(0.1)
+_, y, _, h = tv.bbox(first)
+arrow_x = next(x for x in range(0, 200, 2) if "indicator" in tv.identify_element(x, y + h // 2))
+tv.event_generate("<ButtonPress-1>", x=arrow_x + 2, y=y + h // 2)
+tv.event_generate("<ButtonRelease-1>", x=arrow_x + 2, y=y + h // 2); pump(0.2)
+check(w.tree.is_open(first) and w.tree.row(tv.get_children(first)[0]) is not None, "clicking the expand arrow populates a row")
+
+# Details pane: updates once the selection settles, not for every row passed
+renders = []
+real_show = w.detail.show
+w.detail.show = lambda *a, **k: (renders.append(1), real_show(*a, **k))
+children = tv.get_children(w.tree.reveal(("equipment", 0, "trend_sat", 0)))
+for iid in list(children)[:30]:
+    tv.selection_set(iid); root.update()
+pump(0.3)
+w.detail.show = real_show
+check(len(renders) <= 3, f"30 quick selection changes rendered the details pane {len(renders)} time(s)")
+
+# Context menus are replaced, not piled up
+w.tree.select(w.tree.reveal(("site",))); pump(0.1)
+for _ in range(3):
+    w._popup(10, 10); w._menu.unpost()
+menus = [c for c in w.win.winfo_children() if c.winfo_class() == "Menu" and c is not w.win.nametowidget(w.win["menu"])]
+check(len(menus) == 1, f"repeated right-clicks keep one popup menu ({len(menus)})")
+
+# Emoji before a value: highlighting must land on the value (Tk 8.6 counts emoji as two positions)
+w.detail._set_text('{\n  "icon": "\U0001F600 fan", "n": 5\n}', mode="json")
+t = w.detail.text
+check(t.get(*t.tag_ranges("number")[:2]) == "5", "syntax colors line up after an emoji")
+
+# Very long lines stay responsive in the details pane
+import base64
+blob = base64.b64encode(os.urandom(400_000)).decode()
+long_file = TMP / "long.json"; long_file.write_text(json.dumps({"image": blob, "wrapper": {"image": blob}}))
+w.open_path(long_file); pump()
+for path, label in ((("image",), "long string"), (("wrapper",), "object containing it")):
+    w.tree.select(w.tree.reveal(path)); pump(0.3)
+    t0 = time.perf_counter()
+    for _ in range(5):
+        t.yview_scroll(3, "units"); root.update()
+    check(time.perf_counter() - t0 < 0.5, f"scrolling the details of the {label} took {time.perf_counter() - t0:.2f}s")
+check("Very long lines are shortened" in t.get("1.0", "end"), "shortened lines are explained")
+
+# A failed reload keeps the document and its expanded rows; fixing the file brings it back
+live = TMP / "edit.json"; live.write_text(json.dumps({"a": {"b": {"c": 1}}, "d": [1, 2]}))
+w.settings.auto_reload = False
+w.open_path(live); pump()
+w.tree.select(w.tree.reveal(("a", "b", "c"))); pump(0.2)
+time.sleep(0.02); live.write_text('{"a": {"b": {"c": 1}}, "d": [1, 2,]}')
+w.reload(); pump(0.3)
+check(w.doc is not None and w.banner.winfo_ismapped(), "a broken save shows a banner and keeps the document")
+check("Couldn't reload edit.json" in w.banner_label.cget("text"), f"banner text: {w.banner_label.cget('text')[:60]!r}")
+check(w.tree.selected_row().path == ("a", "b", "c"), "the selection survives the failed reload")
+time.sleep(0.02); live.write_text(json.dumps({"a": {"b": {"c": 2}}, "d": [1, 2]}))
+w.reload(); pump(0.3)
+check(not w.banner.winfo_ismapped() and w.doc.data["a"]["b"]["c"] == 2, "fixing the file reloads and hides the banner")
+check(w.tree.selected_row().path == ("a", "b", "c"), "selection restored after the fix")
+
+# Stray Ctrl+V with non-JSON on the clipboard doesn't replace the document
+root.clipboard_clear(); root.clipboard_append("not json at all")
+w.open_clipboard(); pump(0.2)
+check(w.doc is not None and w.doc.file == live and w.banner.winfo_ismapped(), "invalid paste keeps the open document")
+w._banner_details(); pump(0.2)
+check(w.doc is None and w._error is not None and not w.banner.winfo_ismapped(), "Show details opens the full error view")
+
+# Closing a second window while its timers are pending must not raise errors
+w.open_path("samples/ahu_points.json"); pump()
+w2 = session.new_window(); w2.open_path("samples/ahu_points.json"); pump()
+w2.tree.select(w2.tree.reveal(("site",))); w2.copy_value()          # starts the status flash timer
+w2.search_entry.focus_set(); w2.search_entry.set_value("supply")
+w2.search_entry.event_generate("<KeyRelease>", keysym="y")           # starts the search debounce timer
+w2.close(); pump(2.6)
+w3 = session.new_window(); pump(0.2)
+w4 = session.new_window(); pump(0.2)
+check(w3.win.winfo_rootx() != w4.win.winfo_rootx(), "new windows cascade instead of stacking exactly")
+w4.close(); w3.close(); pump(0.2)
+check(not errors_reported, f"no errors from timers of closed windows ({errors_reported[:1]})")
+
 session.quit()
 saved = json.loads((TMP / "appdata" / "JSONViewer" / "settings.json").read_text())
-check(saved["recent"][0].endswith("big.json") and saved["auto_reload"] is True, "settings saved on exit")
+check(saved["recent"][0].endswith("ahu_points.json") and any(r.endswith("big.json") for r in saved["recent"])
+      and saved["auto_reload"] is False, "settings saved on exit")
+# ---------------------------------------------------------------------------
+# Review fixes that need fresh sessions
+# ---------------------------------------------------------------------------
+settings_file = TMP / "appdata" / "JSONViewer" / "settings.json"
+
+def new_session(theme=None):
+    r, d = A.create_root()
+    sess = A.Session(r, Settings.load(), d, theme=theme)
+    win = A.ViewerWindow(r, sess, is_main=True)
+    win.restore_layout(); r.deiconify(); r.update()
+    return r, sess, win
+
+def spin(r, seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            r.update()
+        except A.tk.TclError:
+            return
+        time.sleep(0.005)
+
+# Tcl prints leaked-timer errors straight to file descriptor 2, so capture that
+stderr_copy = os.dup(2)
+captured = TMP / "stderr.txt"
+with open(captured, "w") as fh:
+    os.dup2(fh.fileno(), 2)
+    try:
+        # A one-off theme isn't saved; a saved left-monitor position doesn't crash startup
+        saved = json.loads(settings_file.read_text())
+        saved["theme"], saved["geometry"] = "system", "1180x760+-1500+100"
+        settings_file.write_text(json.dumps(saved))
+        r, sess, win = new_session(theme="dark")
+        check(sess.theme.mode == "dark", "theme override applies to the session")
+        spin(r, 0.3); sess.quit()
+        check(json.loads(settings_file.read_text())["theme"] == "system", "theme override was not saved")
+        # Three more sessions in a row, like repeated view() calls, each idling past the 2 s theme poll
+        for _ in range(3):
+            r, sess, win = new_session(); spin(r, 2.3); sess.quit()
+    finally:
+        os.dup2(stderr_copy, 2)
+tcl_errors = captured.read_text()
+check("bgerror" not in tcl_errors and "invalid command" not in tcl_errors, f"no leaked-timer errors across sessions {tcl_errors[:120]!r}")
+
+# Two instances: the one that closes last keeps the other's recent files
+first, second = Settings.load(), Settings.load()
+first.add_recent(r"C:\data\one.json"); second.add_recent(r"C:\data\two.json")
+first.save(); second.save()
+recent = Settings.load().recent
+check(r"C:\data\one.json" in recent and r"C:\data\two.json" in recent, "recent files from both instances kept")
+second.remove_recent(r"C:\data\one.json"); second.save()
+check(r"C:\data\one.json" not in Settings.load().recent, "a removal isn't undone by the merge")
+settings_file.write_text('{"recent": "oops", "maximized": "yes", "theme": 3, "details_width": -5}')
+bad = Settings.load()
+check(bad.recent == [] and bad.maximized is False and bad.theme == "system" and bad.details_width is None,
+      "hand-edited settings with wrong types fall back to defaults")
+
+# Closing the main window keeps other windows open; the app ends with the last window
+r, sess, win = new_session()
+other = sess.new_window(); other.open_path("samples/ahu_points.json"); spin(r, 0.3)
+win.close(); spin(r, 0.3)
+check(r.state() == "withdrawn" and other.win.winfo_exists() and other.alive, "closing the main window keeps the other open")
+other.close(); spin(r, 0.3)
+try:
+    r.winfo_exists(); ended = False
+except A.tk.TclError:
+    ended = True
+check(ended, "closing the last window exits the app")
+
 print("\nFAILURES:", fails if fails else "none")
 shutil.rmtree(TMP, ignore_errors=True)
 sys.exit(1 if fails else 0)

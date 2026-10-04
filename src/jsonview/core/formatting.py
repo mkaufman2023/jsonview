@@ -87,13 +87,14 @@ def to_json(value: Any, indent: int | None = 2) -> str:
         return json.dumps(value, ensure_ascii=False, indent=indent, default=repr)
     except (TypeError, ValueError):  # e.g. dict keys that JSON can't represent
         return pprint.pformat(value, sort_dicts=False)
+    # RecursionError deliberately propagates: copying must never silently produce the wrong text.
 
 
 def to_json_limited(value: Any, limit: int, indent: int = 2) -> tuple[str, bool]:
     """Pretty-print at most ``limit`` characters. Returns (text, was_truncated).
 
     Uses the incremental encoder so a huge subtree costs only as much as the
-    part that is actually shown.
+    part that is actually shown. Raises RecursionError for extremely deep nesting.
     """
     encoder = json.JSONEncoder(ensure_ascii=False, indent=indent, default=repr)
     parts: list[str] = []
@@ -149,6 +150,6 @@ def parse_embedded_json(text: Any, max_chars: int = 50_000_000) -> Any | None:
         return None
     try:
         parsed = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     return parsed if isinstance(parsed, (Mapping, list)) else None

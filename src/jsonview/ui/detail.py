@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import tkinter as tk
+from bisect import bisect_left
 from collections.abc import Callable, Mapping
 from itertools import islice
 from tkinter import ttk
@@ -16,6 +17,10 @@ from .theme import Palette, ThemeManager
 from .tree import autohide
 
 TEXT_LIMIT = 200_000  # characters rendered; Copy value always gets the full text
+# Tk's text widget slows to a crawl on extremely long lines, so lines are shortened for display.
+LINE_LIMITS = {"json": 2_000, "string": 10_000, "note": 10_000}
+# Tk 8.6 stores characters outside the Basic Multilingual Plane (emoji) as two positions.
+_ASTRAL = re.compile("[\U00010000-\U0010FFFF]") if tk.TkVersion < 9 else None
 
 _TOKEN = re.compile(
     r'(?P<str>"(?:[^"\\]|\\.)*")(?P<colon>\s*:)?'
@@ -56,7 +61,7 @@ class DetailPane(ttk.Frame):
         self.text = tk.Text(
             self, wrap="none", state="disabled", relief="flat", borderwidth=0,
             highlightthickness=0, padx=14, pady=10, undo=False, font=theme.fonts.mono,
-            cursor="arrow", spacing1=1, spacing3=1,
+            cursor="xterm", spacing1=1, spacing3=1,
         )
         ysb = ttk.Scrollbar(self, orient="vertical", command=self.text.yview)
         xsb = ttk.Scrollbar(self, orient="horizontal", command=self.text.xview)
@@ -70,6 +75,7 @@ class DetailPane(ttk.Frame):
         self.text.bind("<Control-a>", self._select_all)
         self.text.bind("<Control-A>", self._select_all)
         self.text.bind("<Button-3>", self._context_menu)
+        self._menu: tk.Menu | None = None
         self.show(None)
 
     # --- content ---------------------------------------------------------------
@@ -97,8 +103,7 @@ class DetailPane(ttk.Frame):
             if self._embedded is not None:
                 self.embedded_button.grid(row=1, column=2, sticky="e", pady=(8, 0), padx=(8, 0))
         else:
-            text, truncated = fmt.to_json_limited(row.value, TEXT_LIMIT)
-            self._set_text(text, mode="json", truncated=truncated)
+            self._show_json(row.value)
 
     def _show_bucket(self, bucket: Bucket, data: Any) -> None:
         container = resolve(data, bucket.path)
@@ -111,22 +116,43 @@ class DetailPane(ttk.Frame):
             subset: Any = dict(islice(container.items(), bucket.start, bucket.stop))
         else:
             subset = container[bucket.start : bucket.stop]
-        text, truncated = fmt.to_json_limited(subset, TEXT_LIMIT)
+        self._show_json(subset)
+
+    def _show_json(self, value: Any) -> None:
+        try:
+            text, truncated = fmt.to_json_limited(value, TEXT_LIMIT)
+        except RecursionError:
+            self._set_text("This value is nested too deeply to show here. Expand it in the tree instead.", mode="note")
+            return
         self._set_text(text, mode="json", truncated=truncated)
+
+    @staticmethod
+    def _shorten_lines(content: str, limit: int) -> tuple[str, bool]:
+        if len(content) <= limit:
+            return content, False
+        lines = content.split("\n")
+        shortened = False
+        for i, line in enumerate(lines):
+            if len(line) > limit:
+                lines[i] = line[:limit] + " …"
+                shortened = True
+        return ("\n".join(lines), True) if shortened else (content, False)
 
     def _set_text(self, content: str, *, mode: str, truncated: bool = False) -> None:
         t = self.text
+        content, shortened = self._shorten_lines(content, LINE_LIMITS[mode])
         t.configure(state="normal", wrap="none" if mode == "json" else "word")
         t.delete("1.0", "end")
         t.insert("1.0", content, ("note",) if mode == "note" else ())
         if mode == "json":
             self._highlight(content)
+        notes = []
+        if shortened:
+            notes.append("Very long lines are shortened here.")
         if truncated:
-            t.insert(
-                "end",
-                f"\n\nShowing the first {TEXT_LIMIT:,} characters. Use Copy value to get all of it.",
-                ("note",),
-            )
+            notes.append(f"Showing the first {TEXT_LIMIT:,} characters.")
+        if notes:
+            t.insert("end", "\n\n" + " ".join(notes) + " Copy value copies all of it.", ("note",))
         t.configure(state="disabled")
         t.yview_moveto(0)
         t.xview_moveto(0)
@@ -134,15 +160,20 @@ class DetailPane(ttk.Frame):
     def _highlight(self, content: str) -> None:
         ranges: dict[str, list[str]] = {k: [] for k in ("key", "string", "number", "boolean", "null", "punct")}
         for lineno, line in enumerate(content.split("\n"), start=1):
+            astral = [m.start() for m in _ASTRAL.finditer(line)] if _ASTRAL else []
+
+            def col(i: int) -> str:  # a Python string index as a Tk text index
+                return f"{lineno}.{i + bisect_left(astral, i) if astral else i}"
+
             for m in _TOKEN.finditer(line):
                 if m.group("str") is not None:
                     tag = "key" if m.group("colon") else "string"
-                    ranges[tag] += (f"{lineno}.{m.start('str')}", f"{lineno}.{m.end('str')}")
+                    ranges[tag] += (col(m.start("str")), col(m.end("str")))
                     if m.group("colon"):
-                        ranges["punct"] += (f"{lineno}.{m.end('str')}", f"{lineno}.{m.end()}")
+                        ranges["punct"] += (col(m.end("str")), col(m.end()))
                 else:
                     tag = m.lastgroup or "punct"
-                    ranges[tag] += (f"{lineno}.{m.start()}", f"{lineno}.{m.end()}")
+                    ranges[tag] += (col(m.start()), col(m.end()))
         for tag, idx in ranges.items():
             for i in range(0, len(idx), 2000):  # Tcl copes with long arg lists, but keep calls modest
                 self.text.tag_add(tag, *idx[i : i + 2000])
@@ -162,7 +193,9 @@ class DetailPane(ttk.Frame):
         return "break"
 
     def _context_menu(self, event) -> None:
-        menu = tk.Menu(self, tearoff=False)
+        if self._menu is not None:
+            self._menu.destroy()
+        self._menu = menu = tk.Menu(self, tearoff=False)
         has_sel = bool(self.text.tag_ranges("sel"))
         menu.add_command(label="Copy", accelerator="Ctrl+C", state="normal" if has_sel else "disabled",
                          command=lambda: self.text.event_generate("<<Copy>>"))

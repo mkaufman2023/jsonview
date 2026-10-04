@@ -35,7 +35,13 @@ SHORTCUTS = [
 
 
 def show_shortcuts(parent: tk.Misc, theme) -> None:
+    existing = getattr(parent, "_jsonview_shortcuts", None)
+    if existing is not None and existing.winfo_exists():  # one at a time, however often F1 is pressed
+        existing.lift()
+        existing.focus_set()
+        return
     top = tk.Toplevel(parent)
+    parent._jsonview_shortcuts = top  # type: ignore[attr-defined]
     top.title("Keyboard shortcuts")
     top.transient(parent)
     top.resizable(False, False)

@@ -8,7 +8,22 @@ from enum import StrEnum
 
 from .model import Path
 
-_IDENTIFIER = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*\Z")
+# RFC 9535 dot-notation names (ASCII subset); anything else uses bracket notation
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_ESCAPES = {"\\": "\\\\", "'": "\\'", "\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _quote_name(name: str) -> str:
+    """A single-quoted JSONPath name with backslashes, quotes and control characters escaped."""
+    out = []
+    for ch in name:
+        if ch in _ESCAPES:
+            out.append(_ESCAPES[ch])
+        elif ch < " ":
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return "'" + "".join(out) + "'"
 
 
 class PathStyle(StrEnum):
@@ -34,8 +49,7 @@ def to_jsonpath(path: Path) -> str:
         elif _IDENTIFIER.match(str(key)):
             parts.append(f".{key}")
         else:
-            escaped = str(key).replace("\\", "\\\\").replace("'", "\\'")
-            parts.append(f"['{escaped}']")
+            parts.append(f"[{_quote_name(str(key))}]")
     return "".join(parts)
 
 

@@ -33,9 +33,19 @@ class Kind(StrEnum):
 
 
 CONTAINER_KINDS = frozenset({Kind.OBJECT, Kind.ARRAY})
+_LEAF_TYPES = frozenset({str, int, float, bool, type(None)})
+
+
+_KIND_BY_TYPE: dict[type, Kind] = {
+    dict: Kind.OBJECT, list: Kind.ARRAY, tuple: Kind.ARRAY, str: Kind.STRING,
+    int: Kind.NUMBER, float: Kind.NUMBER, bool: Kind.BOOLEAN, type(None): Kind.NULL,
+}
 
 
 def kind_of(value: Any) -> Kind:
+    kind = _KIND_BY_TYPE.get(type(value))  # fast path for exact JSON types
+    if kind is not None:
+        return kind
     if value is None:
         return Kind.NULL
     if isinstance(value, bool):  # must come before int: bool is an int subclass
@@ -53,10 +63,6 @@ def kind_of(value: Any) -> Kind:
 
 def is_container(value: Any) -> bool:
     return kind_of(value) in CONTAINER_KINDS
-
-
-def child_count(value: Any) -> int:
-    return len(value) if is_container(value) else 0
 
 
 def resolve(data: Any, path: Path) -> Any:
@@ -92,10 +98,6 @@ class Entry:
     def is_container(self) -> bool:
         return self.kind in CONTAINER_KINDS
 
-    @property
-    def parent_is_array(self) -> bool:
-        return isinstance(self.key, int) and not isinstance(self.key, bool)
-
 
 @dataclass(frozen=True, slots=True)
 class Bucket:
@@ -121,8 +123,13 @@ def root_entry(data: Any) -> Entry:
     return Entry(None, (), data, kind_of(data))
 
 
-def iter_entries(container: Any, path: Path, start: int = 0, stop: int | None = None) -> Iterator[Entry]:
-    if isinstance(container, Mapping):
+def iter_entries(
+    container: Any, path: Path, start: int = 0, stop: int | None = None, keys: list | None = None
+) -> Iterator[Entry]:
+    """Entries for container[start:stop]. ``keys`` (an object's key list) makes slicing big objects cheap."""
+    if keys is not None and isinstance(container, Mapping):
+        pairs = ((k, container[k]) for k in keys[start:stop])
+    elif isinstance(container, Mapping):
         pairs = islice(container.items(), start, stop)
     else:
         pairs = enumerate(container[start:stop], start)
@@ -138,27 +145,43 @@ def plan_children(
     *,
     direct_limit: int = DIRECT_LIMIT,
     base: int = BUCKET_BASE,
+    keys: list | None = None,
 ) -> list[Row]:
     """Rows to show for ``container[start:stop]``: entries, or buckets if there are too many."""
     total = len(container)
     stop = total if stop is None else min(stop, total)
     span = stop - start
     if span <= direct_limit:
-        return list(iter_entries(container, path, start, stop))
+        return list(iter_entries(container, path, start, stop, keys))
     chunk = base
     while -(-span // chunk) > base:  # ceil(span / chunk) buckets must fit in one level
         chunk *= base
     return [Bucket(path, s, min(s + chunk, stop)) for s in range(start, stop, chunk)]
 
 
-def bucket_key_range(container: Any, bucket: Bucket, max_chars: int = 28) -> str:
-    """For object buckets, describe the first and last key in the range."""
+def bucket_key_ranges(
+    container: Any, buckets: list[Bucket], keys: list | None = None, max_chars: int = 28
+) -> list[str]:
+    """Value-column text for a run of buckets: the first and last key for objects, a count for arrays.
+
+    Reads the keys in a single pass (or from ``keys``), instead of rescanning
+    the object from the start for every bucket.
+    """
     if not isinstance(container, Mapping):
-        return f"{bucket.size:,} items"
-    keys = list(islice(container.keys(), bucket.start, bucket.stop))
-    first, last = (str(k) for k in (keys[0], keys[-1]))
-    trim = lambda s: s if len(s) <= max_chars else s[: max_chars - 1] + "…"  # noqa: E731
-    return f"{trim(first)} … {trim(last)}"
+        return [f"{b.size:,} items" for b in buckets]
+    if not buckets:
+        return []
+    if keys is None:
+        offset = buckets[0].start
+        keys = list(islice(container.keys(), offset, buckets[-1].stop))
+    else:
+        offset = 0
+
+    def trim(key: Any) -> str:
+        text = str(key)
+        return text if len(text) <= max_chars else text[: max_chars - 1] + "…"
+
+    return [f"{trim(keys[b.start - offset])} … {trim(keys[b.stop - 1 - offset])}" for b in buckets]
 
 
 def count_nodes(value: Any, limit: int | None = None) -> int:
@@ -170,7 +193,14 @@ def count_nodes(value: Any, limit: int | None = None) -> int:
         count += 1
         if limit is not None and count > limit:
             return count
-        if isinstance(current, Mapping):
+        t = type(current)
+        if t is dict:
+            stack.extend(current.values())
+        elif t is list:
+            stack.extend(current)
+        elif t in _LEAF_TYPES:
+            continue
+        elif isinstance(current, Mapping):
             stack.extend(current.values())
         elif isinstance(current, (list, tuple)):
             stack.extend(current)
@@ -186,7 +216,14 @@ def iter_node_count(value: Any, step: int = 50_000) -> Iterator[int]:
         count += 1
         if count % step == 0:
             yield count
-        if isinstance(current, Mapping):
+        t = type(current)
+        if t is dict:
+            stack.extend(current.values())
+        elif t is list:
+            stack.extend(current)
+        elif t in _LEAF_TYPES:
+            continue
+        elif isinstance(current, Mapping):
             stack.extend(current.values())
         elif isinstance(current, (list, tuple)):
             stack.extend(current)

@@ -14,16 +14,26 @@ def _coerce(obj: Any) -> Document | LoadError | Path | None:
         return None
     if isinstance(obj, os.PathLike):
         return Path(obj)
+    source = "Python string"
     # requests.Response, httpx.Response and similar
-    if not isinstance(obj, (dict, list, tuple, str, bytes)) and callable(getattr(obj, "json", None)):
-        return load_object(obj.json(), source=f"{type(obj).__name__}.json()")
+    if not isinstance(obj, (dict, list, tuple, str, bytes, bytearray)) and callable(getattr(obj, "json", None)):
+        source = f"{type(obj).__name__}.json()"
+        obj = obj.json()
+        if not isinstance(obj, (str, bytes, bytearray)):
+            return load_object(obj, source=source)
+        # some libraries' .json() returns JSON text (e.g. pydantic v1): parse it below
     if isinstance(obj, (bytes, bytearray)):
         obj = decode_bytes(bytes(obj))[0]
     if isinstance(obj, str):
-        if len(obj) < 1024 and "\n" not in obj and obj.strip() and Path(obj.strip()).is_file():
-            return Path(obj.strip())
+        candidate = obj.strip()
+        if len(candidate) < 1024 and "\n" not in candidate and candidate[:1] not in ("{", "[", '"'):
+            try:
+                if Path(candidate).is_file():
+                    return Path(candidate)
+            except (OSError, ValueError):  # not a usable path
+                pass
         try:
-            return load_text(obj, source="Python string")
+            return load_text(obj, source=source)
         except LoadError as err:
             return err
     return load_object(obj)

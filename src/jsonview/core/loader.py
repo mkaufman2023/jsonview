@@ -38,13 +38,15 @@ class LoadError(Exception):
         line: int | None = None,
         column: int | None = None,
         line_text: str | None = None,
+        line_start: int = 0,
     ) -> None:
         super().__init__(message)
         self.message = message
         self.source = source
         self.line = line
         self.column = column
-        self.line_text = line_text
+        self.line_text = line_text  # may be an excerpt of a very long line...
+        self.line_start = line_start  # ...starting at this 0-based character offset
 
     @property
     def location(self) -> str | None:
@@ -57,7 +59,7 @@ class LoadError(Exception):
         if self.line_text is None or self.column is None:
             return None
         text = self.line_text.replace("\t", " ")  # the parser counts a tab as one column
-        col = max(self.column - 1, 0)
+        col = max(self.column - 1 - self.line_start, 0)
         start = max(0, min(col - width // 2, len(text) - width))
         clipped = text[start : start + width]
         caret = col - start
@@ -72,48 +74,85 @@ def decode_bytes(raw: bytes) -> tuple[str, str]:
     """Decode file bytes. Returns (text, encoding name shown to the user).
 
     Windows PowerShell 5.1's Out-File and > redirection write UTF-16 with a BOM,
-    and some older tools write Windows-1252, so both are handled.
+    and some older tools write Windows-1252, so both are handled. Invalid bytes
+    become U+FFFD rather than failing the whole file.
     """
+    if raw.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):  # before UTF-16: same first bytes
+        return raw.decode("utf-32", errors="replace"), "UTF-32"
     if raw.startswith(codecs.BOM_UTF8):
-        return raw[len(codecs.BOM_UTF8) :].decode("utf-8"), "UTF-8 with BOM"
+        return raw[len(codecs.BOM_UTF8) :].decode("utf-8", errors="replace"), "UTF-8 with BOM"
     if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-        return raw.decode("utf-16"), "UTF-16"
+        return raw.decode("utf-16", errors="replace"), "UTF-16"
     try:
         return raw.decode("utf-8"), "UTF-8"
     except UnicodeDecodeError:
         return raw.decode("cp1252", errors="replace"), "Windows-1252"
 
 
+EXCERPT = 2000  # characters kept on each side of an error in a very long line
+
+
+def _iter_lines(text: str):
+    """Split on \n only, like the JSON parser counts lines. (str.splitlines also splits on
+    U+2028 and other characters that are allowed inside JSON strings.)"""
+    start = 0
+    while True:
+        end = text.find("\n", start)
+        line = text[start:] if end == -1 else text[start:end]
+        yield line[:-1] if line.endswith("\r") else line
+        if end == -1:
+            return
+        start = end + 1
+
+
 def _error_from_decode(exc: json.JSONDecodeError, source: str, line_offset: int = 0) -> LoadError:
-    lines = exc.doc.splitlines()
-    line_text = lines[exc.lineno - 1] if 0 < exc.lineno <= len(lines) else ""
+    doc, pos = exc.doc, exc.pos
+    start = doc.rfind("\n", 0, pos) + 1
+    end = doc.find("\n", pos)
+    line = doc[start : len(doc) if end == -1 else end].removesuffix("\r")
+    col = exc.colno - 1
+    excerpt_start = max(0, col - EXCERPT)
     return LoadError(
         exc.msg,
         source=source,
         line=exc.lineno + line_offset,
         column=exc.colno,
-        line_text=line_text,
+        line_text=line[excerpt_start : col + EXCERPT],
+        line_start=excerpt_start,
     )
+
+
+def _value_error(exc: Exception, source: str, line: int | None = None) -> LoadError:
+    """Errors the parser raises that aren't syntax errors."""
+    if isinstance(exc, RecursionError):
+        message = "The document is nested too deeply to read."
+    elif "integer string conversion" in str(exc):
+        message = "A number has more digits than Python reads by default (4,300)."
+    else:
+        message = str(exc)
+    return LoadError(message, source=source, line=line, column=1 if line else None)
 
 
 def _parse_json_lines(text: str, source: str) -> list[Any]:
     records = []
-    for number, line in enumerate(text.splitlines(), start=1):
+    for number, line in enumerate(_iter_lines(text), start=1):
         if not line.strip():
             continue
         try:
             records.append(json.loads(line))
         except json.JSONDecodeError as exc:
             raise _error_from_decode(exc, source, line_offset=number - 1) from None
+        except (ValueError, RecursionError) as exc:
+            raise _value_error(exc, source, line=number) from None
     return records
 
 
 def _looks_like_json_lines(text: str) -> bool:
-    for line in text.splitlines():
+    for line in _iter_lines(text):
         if line.strip():
             try:
                 json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 return False
             return True
     return False
@@ -121,6 +160,7 @@ def _looks_like_json_lines(text: str) -> bool:
 
 def parse_text(text: str, *, source: str, json_lines: bool = False) -> tuple[Any, str]:
     """Parse text as JSON (or JSON Lines). Returns (data, format name)."""
+    text = text.removeprefix("\ufeff")  # a BOM that survived decoding, e.g. pasted text
     if not text.strip():
         raise LoadError("There's nothing to read: the input is empty.", source=source)
     if json_lines:
@@ -135,22 +175,21 @@ def parse_text(text: str, *, source: str, json_lines: bool = False) -> tuple[Any
             except LoadError:
                 pass
         raise _error_from_decode(exc, source) from None
-    except ValueError as exc:  # e.g. a number with more digits than Python allows by default
-        raise LoadError(str(exc), source=source) from None
-    except RecursionError:
-        raise LoadError("The document is nested too deeply to read.", source=source) from None
+    except (ValueError, RecursionError) as exc:  # e.g. a number with more digits than Python allows
+        raise _value_error(exc, source) from None
 
 
 def load_file(path: str | FilePath) -> Document:
-    file = FilePath(path).expanduser()
+    # absolute(), not resolve(): resolve() rewrites mapped network drives as UNC server/share paths
+    file = FilePath(path).expanduser().absolute()
     source = str(file)
     started = time.perf_counter()
+    if file.is_dir():  # Windows reports reading a folder as "permission denied"
+        raise LoadError("That's a folder, not a file. Choose a JSON file inside it.", source=source)
     try:
         raw = file.read_bytes()
     except FileNotFoundError:
         raise LoadError("The file doesn't exist. It may have been moved or deleted.", source=source) from None
-    except IsADirectoryError:
-        raise LoadError("That's a folder, not a file.", source=source) from None
     except PermissionError:
         raise LoadError("Windows denied access to the file. It may be open in another program.", source=source) from None
     except OSError as exc:
@@ -160,7 +199,7 @@ def load_file(path: str | FilePath) -> Document:
     return Document(
         data=data,
         source=source,
-        file=file.resolve(),
+        file=file,
         format=fmt,
         encoding=encoding,
         size_bytes=len(raw),

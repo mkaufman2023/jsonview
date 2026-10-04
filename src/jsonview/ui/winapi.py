@@ -12,7 +12,6 @@ IS_WINDOWS = sys.platform == "win32"
 _DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 _DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19  # Windows 10 before 20H1
 _DWMWA_CAPTION_COLOR = 35  # Windows 11 only
-_DWMWA_TEXT_COLOR = 36
 
 
 def enable_dpi_awareness() -> None:
@@ -59,13 +58,17 @@ def system_prefers_dark() -> bool:
         return False
 
 
-def _colorref(hex_color: str) -> ctypes.c_int:
-    r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
-    return ctypes.c_int(r | (g << 8) | (b << 16))  # COLORREF is 0x00BBGGRR
+def _colorref(window: tk.Misc, color: str) -> ctypes.c_int:
+    """Any Tk color ("#1c1c1c", "SystemButtonFace", ...) as a Windows COLORREF (0x00BBGGRR)."""
+    r, g, b = (c >> 8 for c in window.winfo_rgb(color))
+    return ctypes.c_int(r | (g << 8) | (b << 16))
 
 
-def style_title_bar(window: tk.Misc, *, dark: bool, caption: str | None = None, text: str | None = None) -> None:
-    """Match the native title bar to the app: dark mode, and on Windows 11 the exact caption color."""
+def style_title_bar(window: tk.Misc, *, dark: bool, caption: str | None = None) -> None:
+    """Match the native title bar to the app: dark mode, and on Windows 11 the exact caption color.
+
+    The title text color is left to Windows so inactive windows still look dimmed.
+    """
     if not IS_WINDOWS:
         return
     try:
@@ -81,15 +84,14 @@ def style_title_bar(window: tk.Misc, *, dark: bool, caption: str | None = None, 
         for attr in (_DWMWA_USE_IMMERSIVE_DARK_MODE, _DWMWA_USE_IMMERSIVE_DARK_MODE_OLD):
             if set_attr(hwnd, attr, ctypes.byref(flag), ctypes.sizeof(flag)) == 0:
                 break
-        for attr, color in ((_DWMWA_CAPTION_COLOR, caption), (_DWMWA_TEXT_COLOR, text)):
-            if color:
-                ref = _colorref(color)
-                set_attr(hwnd, attr, ctypes.byref(ref), ctypes.sizeof(ref))
+        if caption:
+            ref = _colorref(window, caption)
+            set_attr(hwnd, _DWMWA_CAPTION_COLOR, ctypes.byref(ref), ctypes.sizeof(ref))
         # Nudge Windows into repainting the non-client area right away.
         alpha = window.wm_attributes("-alpha")
         window.wm_attributes("-alpha", 0.99)
         window.wm_attributes("-alpha", alpha)
-    except (AttributeError, OSError, tk.TclError):
+    except (AttributeError, OSError, ValueError, tk.TclError):
         pass
 
 
