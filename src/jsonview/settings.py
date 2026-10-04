@@ -1,4 +1,6 @@
-"""User settings, stored as JSON in %APPDATA%\\JSONViewer\\settings.json."""
+"""
+User settings, stored as JSON in %APPDATA%\\jsonview\\settings.json.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +10,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-APP_DIR = Path(os.environ.get("APPDATA") or Path.home() / ".config") / "JSONViewer"
+APP_DIR = Path(os.environ.get("APPDATA") or Path.home() / ".config") / "jsonview"
 SETTINGS_FILE = APP_DIR / "settings.json"
 MAX_RECENT = 12
 
