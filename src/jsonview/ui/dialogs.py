@@ -30,6 +30,7 @@ SHORTCUTS = [
     ("Window", [
         ("Show or hide details", "Ctrl+D"),
         ("Switch light and dark", "Ctrl+T"),
+        ("Menus", "Alt or F10, then the arrow keys; or Alt+F, E, V, H"),
     ]),
 ]
 

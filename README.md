@@ -87,8 +87,8 @@ script or from the REPL while you're exploring an API.
     instead of replacing the document.
 - Parse errors show the exact line and column with the offending text.
 - Follows Windows' light or dark mode (or pick one in **View > Theme**),
-    including the title bar. It's DPI-aware, so text stays sharp at 125% or
-    150% display scaling instead of being blurrily stretched.
+    including the title bar and menus. It's DPI-aware, so text stays sharp
+    at 125% or 150% display scaling instead of being blurrily stretched.
 - Remembers window size and position, the details pane width, recent files,
     and preferences in `%APPDATA%\JSONViewer\settings.json`. Several open
     copies of the app share recent files rather than overwriting each other's.
@@ -111,6 +111,7 @@ src/jsonview/
         app.py         The window: menus, toolbar, search, open/reload, copy
         tree.py        The lazy tree widget
         detail.py      The details pane
+        menus.py       Menu bar, dropdowns and right-click menus, drawn in the theme's colors
         theme.py       sv-ttk setup, colors, fonts, styles
         winapi.py      DPI awareness, dark title bar, taskbar icon
         widgets.py     Tooltip and placeholder entry
@@ -135,8 +136,10 @@ temporary settings folder so it never touches yours.
 
 ## Known limitations
 
-- The menu bar stays light in dark mode. It's a native Windows menu, and
-    Windows doesn't offer dark menus to classic apps.
+- The menus are drawn by the app rather than Windows, so they follow the
+    theme. (Windows draws native menu bars light, and draws submenu arrows
+    black even on a dark menu.) The trade-off: screen readers don't announce
+    them the way they do native menus.
 - sv-ttk draws checkboxes and button corners from fixed-size images, so at
     high display scaling those details are a little small. Text scales correctly.
 - Parsing happens on the UI thread. An 11 MB file opened in about 0.2 s in
