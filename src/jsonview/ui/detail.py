@@ -13,6 +13,7 @@ from typing import Any
 from ..core import formatting as fmt
 from ..core.model import Bucket, Entry, Kind, Row, resolve
 from ..core.paths import to_jsonpath
+from .menus import Menu
 from .theme import Palette, ThemeManager
 from .tree import autohide
 
@@ -75,7 +76,7 @@ class DetailPane(ttk.Frame):
         self.text.bind("<Control-a>", self._select_all)
         self.text.bind("<Control-A>", self._select_all)
         self.text.bind("<Button-3>", self._context_menu)
-        self._menu: tk.Menu | None = None
+        self._menu: Menu | None = None
         self.show(None)
 
     # --- content ---------------------------------------------------------------
@@ -195,15 +196,12 @@ class DetailPane(ttk.Frame):
     def _context_menu(self, event) -> None:
         if self._menu is not None:
             self._menu.destroy()
-        self._menu = menu = tk.Menu(self, tearoff=False)
+        self._menu = menu = Menu(self, self.theme)
         has_sel = bool(self.text.tag_ranges("sel"))
         menu.add_command(label="Copy", accelerator="Ctrl+C", state="normal" if has_sel else "disabled",
                          command=lambda: self.text.event_generate("<<Copy>>"))
         menu.add_command(label="Select all", accelerator="Ctrl+A", command=self._select_all)
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+        menu.popup(event.x_root, event.y_root)
 
     # --- theme -------------------------------------------------------------------
 

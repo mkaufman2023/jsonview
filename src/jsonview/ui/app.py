@@ -23,6 +23,7 @@ from ..core.search import Query, iter_matches
 from ..settings import Settings
 from . import dialogs, winapi
 from .detail import DetailPane
+from .menus import Menu, MenuBar
 from .theme import Palette, ThemeManager
 from .tree import JsonTree, TreeState
 from .widgets import PlaceholderEntry, Tooltip
@@ -163,7 +164,7 @@ class ViewerWindow:
         self._matches: list = []
         self._match_index = -1
         self._detail_job: str | None = None
-        self._menu: tk.Menu | None = None
+        self._menu: Menu | None = None
         self._banner_error: tuple[LoadError, FilePath | None] | None = None
         self._loaded_at = ""
 
@@ -171,7 +172,7 @@ class ViewerWindow:
         scale = win.winfo_fpixels("1i") / 96.0
         win.minsize(round(640 * scale), round(400 * scale))
         win.columnconfigure(0, weight=1)
-        win.rowconfigure(2, weight=1)
+        win.rowconfigure(3, weight=1)
 
         self.case_var = tk.BooleanVar(win, False)
         self.regex_var = tk.BooleanVar(win, False)
@@ -183,7 +184,7 @@ class ViewerWindow:
 
         self._build_menu()
         self._build_toolbar()
-        ttk.Separator(win).grid(row=1, column=0, sticky="ew")
+        ttk.Separator(win).grid(row=2, column=0, sticky="ew")
         self._build_body()
         self._build_status()
         self._bind_keys()
@@ -201,11 +202,13 @@ class ViewerWindow:
     # ======================================================================
 
     def _build_menu(self) -> None:
-        bar = tk.Menu(self.win)
-        file = tk.Menu(bar, tearoff=False)
+        # Drawn by Tk rather than Windows, so it follows the dark theme (see menus.py).
+        self.menu_bar = bar = MenuBar(self.win, padding=(8, 4, 8, 0))
+        bar.grid(row=0, column=0, sticky="ew")
+        file = Menu(self.win, self.theme)
         file.add_command(label="Open…", accelerator="Ctrl+O", command=self.open_dialog)
         file.add_command(label="Open from clipboard", accelerator="Ctrl+Shift+V", command=self.open_clipboard)
-        self.recent_menu = tk.Menu(file, tearoff=False, postcommand=self._fill_recent_menu)
+        self.recent_menu = Menu(file, self.theme, postcommand=self._fill_recent_menu)
         file.add_cascade(label="Open recent", menu=self.recent_menu)
         file.add_separator()
         file.add_command(label="Reload", accelerator="F5", command=self.reload)
@@ -215,9 +218,9 @@ class ViewerWindow:
         file.add_command(label="New window", accelerator="Ctrl+N", command=self.session.new_window)
         file.add_command(label="Close window", accelerator="Ctrl+W", command=self.close)
         file.add_command(label="Exit", command=self.session.quit)
-        bar.add_cascade(label="File", menu=file)
+        bar.add_cascade("File", file)
 
-        edit = tk.Menu(bar, tearoff=False)
+        edit = Menu(self.win, self.theme)
         edit.add_command(label="Copy value", accelerator="Ctrl+C", command=self.copy_value)
         edit.add_command(label="Copy key", command=self.copy_key)
         edit.add_cascade(label="Copy path", menu=self._path_menu(edit))
@@ -226,14 +229,14 @@ class ViewerWindow:
         edit.add_command(label="Find", accelerator="Ctrl+F", command=self.focus_search)
         edit.add_command(label="Find next", accelerator="F3", command=lambda: self.find_step(1))
         edit.add_command(label="Find previous", accelerator="Shift+F3", command=lambda: self.find_step(-1))
-        options = tk.Menu(edit, tearoff=False)
+        options = Menu(edit, self.theme)
         for label, var in (("Match case", self.case_var), ("Regular expression", self.regex_var),
                            ("Search keys", self.keys_var), ("Search values", self.values_var)):
             options.add_checkbutton(label=label, variable=var, command=self.start_search)
         edit.add_cascade(label="Search options", menu=options)
-        bar.add_cascade(label="Edit", menu=edit)
+        bar.add_cascade("Edit", edit)
 
-        view = tk.Menu(bar, tearoff=False)
+        view = Menu(self.win, self.theme)
         view.add_command(label="Expand all", accelerator="Ctrl+E", command=self.expand_all)
         view.add_command(label="Collapse all", accelerator="Ctrl+L", command=self.collapse_all)
         view.add_command(label="Expand selected branch", accelerator="*", command=self.expand_branch)
@@ -241,22 +244,21 @@ class ViewerWindow:
         view.add_separator()
         view.add_checkbutton(label="Details pane", accelerator="Ctrl+D", variable=self.details_var,
                              command=self._apply_details_visibility)
-        theme_menu = tk.Menu(view, tearoff=False)
+        theme_menu = Menu(view, self.theme)
         for label, value in (("Match Windows", "system"), ("Light", "light"), ("Dark", "dark")):
             theme_menu.add_radiobutton(label=label, value=value, variable=self.theme_var,
                                        command=lambda: self.theme.set_mode(self.theme_var.get()))
         view.add_cascade(label="Theme", menu=theme_menu)
-        bar.add_cascade(label="View", menu=view)
+        bar.add_cascade("View", view)
 
-        help_ = tk.Menu(bar, tearoff=False)
+        help_ = Menu(self.win, self.theme)
         help_.add_command(label="Keyboard shortcuts", accelerator="F1",
                           command=lambda: dialogs.show_shortcuts(self.win, self.theme))
         help_.add_command(label="About", command=lambda: dialogs.show_about(self.win, self.session))
-        bar.add_cascade(label="Help", menu=help_)
-        self.win.configure(menu=bar)
+        bar.add_cascade("Help", help_)
 
-    def _path_menu(self, parent: tk.Menu) -> tk.Menu:
-        menu = tk.Menu(parent, tearoff=False)
+    def _path_menu(self, parent: Menu) -> Menu:
+        menu = Menu(parent, self.theme)
         accelerators = {PathStyle.JSONPATH: "Ctrl+Shift+C", PathStyle.PYTHON: "Ctrl+Alt+C"}
         for style in PathStyle:
             menu.add_command(label=style.title, accelerator=accelerators.get(style, ""),
@@ -273,7 +275,7 @@ class ViewerWindow:
 
     def _build_toolbar(self) -> None:
         bar = ttk.Frame(self.win, padding=(8, 6, 8, 6))
-        bar.grid(row=0, column=0, sticky="ew")
+        bar.grid(row=1, column=0, sticky="ew")
         self._icon_button(bar, "open", "Open a file (Ctrl+O)", self.open_dialog).pack(side="left")
         self._icon_button(bar, "paste", "Open JSON from the clipboard (Ctrl+Shift+V)", self.open_clipboard).pack(side="left")
         self._icon_button(bar, "reload", "Reload the file (F5)", self.reload).pack(side="left")
@@ -309,7 +311,7 @@ class ViewerWindow:
 
     def _build_body(self) -> None:
         self.body = ttk.Frame(self.win)
-        self.body.grid(row=2, column=0, sticky="nsew")
+        self.body.grid(row=3, column=0, sticky="nsew")
         self.body.rowconfigure(1, weight=1)
         self.body.columnconfigure(0, weight=1)
 
@@ -353,7 +355,7 @@ class ViewerWindow:
 
     def _build_status(self) -> None:
         bar = ttk.Frame(self.win, padding=(12, 4, 12, 5))
-        bar.grid(row=3, column=0, sticky="ew")
+        bar.grid(row=4, column=0, sticky="ew")
         bar.columnconfigure(0, weight=1)
         self.status_left = ttk.Label(bar, style="Caption.TLabel", anchor="w")
         self.status_left.grid(row=0, column=0, sticky="ew")
@@ -662,7 +664,7 @@ class ViewerWindow:
 
     def _fill_recent_menu(self) -> None:
         menu = self.recent_menu
-        menu.delete(0, "end")
+        menu.clear()
         if not self.settings.recent:
             menu.add_command(label="No recent files", state="disabled")
             return
@@ -751,7 +753,7 @@ class ViewerWindow:
             return
         if self._menu is not None:  # replace, rather than pile up, menu widgets
             self._menu.destroy()
-        self._menu = menu = tk.Menu(self.win, tearoff=False)
+        self._menu = menu = Menu(self.win, self.theme)
         if isinstance(row, Entry):
             menu.add_command(label="Copy value", accelerator="Ctrl+C", command=self.copy_value)
             if row.key is not None:
@@ -770,10 +772,7 @@ class ViewerWindow:
             menu.add_separator()
             menu.add_command(label="Expand branch", accelerator="*", command=self.expand_branch)
             menu.add_command(label="Collapse branch", command=self.collapse_branch)
-        try:
-            menu.tk_popup(x, y)
-        finally:
-            menu.grab_release()
+        menu.popup(x, y)
 
     def _on_double_click(self, event) -> str | None:
         row = self.tree.row(self.tree.tv.identify_row(event.y))

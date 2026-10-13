@@ -29,6 +29,11 @@ class Palette:
     accent: str
     error: str
     match: str
+    disabled: str
+    # popup menus: raised a step from the window, as on Windows 11
+    menu: str
+    menu_hover: str
+    menu_border: str
     # one color per JSON value type, shared by the tree and the detail pane
     string: str
     number: str
@@ -37,11 +42,13 @@ class Palette:
 
 
 _LIGHT = dict(
-    muted="#616161", accent="#005fb8", error="#c42b1c", match="#fbe7a1",
+    muted="#616161", accent="#005fb8", error="#c42b1c", match="#fbe7a1", disabled="#a0a0a0",
+    menu="#f9f9f9", menu_hover="#ebebeb", menu_border="#d1d1d1",
     string="#17794a", number="#1c5fb0", boolean="#8a3fb0", null="#7c7c7c",
 )
 _DARK = dict(
-    muted="#a8a8a8", accent="#60cdff", error="#ff99a4", match="#5a4a1a",
+    muted="#a8a8a8", accent="#60cdff", error="#ff99a4", match="#5a4a1a", disabled="#7a7a7a",
+    menu="#2b2b2b", menu_hover="#3d3d3d", menu_border="#484848",
     string="#7fd1a0", number="#8cb8ff", boolean="#d4a6f2", null="#8f8f8f",
 )
 
@@ -64,6 +71,7 @@ class Fonts:
         self.display = tkfont.Font(root=root, family=mono, size=34)
         icon_family = next((f for f in ICON_FAMILIES if f in families), None)
         self.icon = tkfont.Font(root=root, family=icon_family, size=11) if icon_family else None
+        self.glyph = tkfont.Font(root=root, family=icon_family, size=8) if icon_family else None  # menu marks
 
 
 def _scale_pixel_fonts(root: tk.Misc) -> None:

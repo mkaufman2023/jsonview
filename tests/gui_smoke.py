@@ -22,6 +22,7 @@ from jsonview.core.model import Entry  # noqa: E402
 from jsonview.core.paths import PathStyle  # noqa: E402
 from jsonview.settings import Settings  # noqa: E402
 from jsonview.ui import app as A  # noqa: E402
+from jsonview.ui import menus as M  # noqa: E402
 
 SHOTS = os.environ.get("JSONVIEW_SHOTS")  # folder for screenshots (Linux/X11 with ImageMagick only)
 root, dnd = A.create_root()
@@ -105,6 +106,44 @@ iid = w.tree.reveal(("notes",)); w.tree.select(iid); pump()
 shot("4_dark_string")
 iid = w.tree.reveal(("equipment", 0, "points")); w.tree.select(iid); tv.item(iid, open=True); pump()
 shot("5_dark_json")
+
+# Menus are drawn in the theme's colors. (Windows draws native ones with a light menu bar,
+# and black check marks and submenu arrows that vanish on a dark menu.)
+ctl, p = w.menu_bar._ctl, w.theme.palette
+check(not w.win["menu"], "no native menu bar")
+tv.focus_force(); pump(0.2)
+ctl.open_bar(2); pump()  # View
+view = ctl.chain[0]
+marks = [view.canvas.itemcget(i, "fill") for i in view.canvas.find_all()
+         if view.canvas.type(i) == "text" and view.canvas.itemcget(i, "text") in M.CHECK + M.ARROW]
+check(view.canvas.cget("background") == p.menu and marks == [p.text, p.text],
+      f"dark menu with check mark and submenu arrow in the text color {marks}")
+check("active" in w.menu_bar.items[2].state(), "open menu's title is highlighted")
+shot("5b_dark_menu")
+details = w.details_var.get()
+i = [e.label for e in view.entries].index("Details pane")
+x, y = view._pos[0] + 40, view._pos[1] + sum(view._rows[i]) // 2
+ctl.sink.event_generate("<Motion>", rootx=x, rooty=y)
+ctl.sink.event_generate("<ButtonPress-1>", rootx=x, rooty=y)
+ctl.sink.event_generate("<ButtonRelease-1>", rootx=x, rooty=y); pump()
+check(w.details_var.get() is not details and not ctl.chain and root.grab_current() is None,
+      "clicking a menu entry runs it and closes the menu")
+check(root.focus_get() is tv, f"focus goes back to the tree ({root.focus_get()})")
+w._toggle_details(); pump(0.1)
+tv.event_generate("<Alt-KeyPress-e>"); pump()  # Edit; End selects "Search options", Right opens it
+check(ctl.chain == [w.menu_bar.menus[1]] and ctl.chain[0].active == 0, "Alt+E opens Edit with its first entry selected")
+case = w.case_var.get()
+for key in ("End", "Right", "Return"):
+    ctl.sink.event_generate(f"<KeyPress-{key}>"); pump(0.05)
+check(w.case_var.get() is not case and not ctl.active, "keyboard reaches a check entry in a submenu")
+w.case_var.set(case)
+tv.event_generate("<Alt-KeyPress-v>"); ctl.sink.event_generate("<KeyPress-Escape>"); pump(0.1)
+check(ctl.active and not ctl.chain and ctl.bar_index == 2, "Escape returns to the menu bar")
+ctl.sink.event_generate("<KeyPress-Escape>"); pump(0.1)
+check(not ctl.active and root.focus_get() is tv, "a second Escape closes it")
+tv.event_generate("<Alt-KeyPress-f>"); ctl.sink.event_generate("<Alt-KeyPress-e>"); pump(0.1)
+check(w.alive and ctl.chain == [w.menu_bar.menus[1]], "Alt+E with File open switches to Edit (never File > Exit)")
+ctl.close_all(); pump(0.1)
 
 # embedded JSON opens a second window
 iid = w.tree.reveal(("raw_payload",)); w.tree.select(iid); pump()
@@ -211,10 +250,13 @@ check(len(renders) <= 3, f"30 quick selection changes rendered the details pane 
 
 # Context menus are replaced, not piled up
 w.tree.select(w.tree.reveal(("site",))); pump(0.1)
+def menu_count():
+    return sum(c.winfo_class() == "ThemedMenu" for c in w.win.winfo_children())
+w._popup(10, 10); w._menu.unpost()
+before = menu_count()
 for _ in range(3):
     w._popup(10, 10); w._menu.unpost()
-menus = [c for c in w.win.winfo_children() if c.winfo_class() == "Menu" and c is not w.win.nametowidget(w.win["menu"])]
-check(len(menus) == 1, f"repeated right-clicks keep one popup menu ({len(menus)})")
+check(menu_count() == before, f"repeated right-clicks keep one popup menu ({menu_count() - before} extra)")
 
 # Emoji before a value: highlighting must land on the value (Tk 8.6 counts emoji as two positions)
 w.detail._set_text('{\n  "icon": "\U0001F600 fan", "n": 5\n}', mode="json")

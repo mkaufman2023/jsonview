@@ -107,3 +107,29 @@ def point_on_screen(window: tk.Misc, x: int, y: int) -> bool:
         except (AttributeError, OSError):
             pass
     return 0 <= x < window.winfo_screenwidth() and 0 <= y < window.winfo_screenheight()
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+
+def work_area(window: tk.Misc, x: int, y: int) -> tuple[int, int, int, int]:
+    """(left, top, right, bottom) of the usable part of the monitor nearest (x, y), taskbar excluded."""
+    if IS_WINDOWS:
+        try:
+            monitor_from_point = ctypes.windll.user32.MonitorFromPoint
+            monitor_from_point.argtypes = [wintypes.POINT, wintypes.DWORD]
+            monitor_from_point.restype = wintypes.HMONITOR
+            get_info = ctypes.windll.user32.GetMonitorInfoW
+            get_info.argtypes = [wintypes.HMONITOR, ctypes.POINTER(_MONITORINFO)]
+            get_info.restype = wintypes.BOOL
+            monitor_default_to_nearest = 2
+            monitor = monitor_from_point(wintypes.POINT(x, y), monitor_default_to_nearest)
+            info = _MONITORINFO(cbSize=ctypes.sizeof(_MONITORINFO))
+            if monitor and get_info(monitor, ctypes.byref(info)):
+                r = info.rcWork
+                return r.left, r.top, r.right, r.bottom
+        except (AttributeError, OSError):
+            pass
+    return 0, 0, window.winfo_screenwidth(), window.winfo_screenheight()
