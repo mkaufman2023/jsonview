@@ -312,13 +312,13 @@ w4.close(); w3.close(); pump(0.2)
 check(not errors_reported, f"no errors from timers of closed windows ({errors_reported[:1]})")
 
 session.quit()
-saved = json.loads((TMP / "appdata" / "JSONViewer" / "settings.json").read_text())
+saved = json.loads((TMP / "appdata" / "jsonview" / "settings.json").read_text())
 check(saved["recent"][0].endswith("ahu_points.json") and any(r.endswith("big.json") for r in saved["recent"])
       and saved["auto_reload"] is False, "settings saved on exit")
 # ---------------------------------------------------------------------------
 # Review fixes that need fresh sessions
 # ---------------------------------------------------------------------------
-settings_file = TMP / "appdata" / "JSONViewer" / "settings.json"
+settings_file = TMP / "appdata" / "jsonview" / "settings.json"
 
 def new_session(theme=None):
     r, d = A.create_root()

@@ -90,7 +90,7 @@ script or from the REPL while you're exploring an API.
     including the title bar and menus. It's DPI-aware, so text stays sharp
     at 125% or 150% display scaling instead of being blurrily stretched.
 - Remembers window size and position, the details pane width, recent files,
-    and preferences in `%APPDATA%\JSONViewer\settings.json`. Several open
+    and preferences in `%APPDATA%\jsonview\settings.json`. Several open
     copies of the app share recent files rather than overwriting each other's.
 - Windows opened with Ctrl+N, drag and drop, or "Open as JSON" stay open if
     you close the first window; the app exits when the last window closes.
