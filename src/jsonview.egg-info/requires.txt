@@ -1,5 +1,0 @@
-sv-ttk>=2.6
-tkinterdnd2>=0.4
-
-[dev]
-pytest>=8

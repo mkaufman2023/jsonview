@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: jsonview
-Version: 0.2.0
-Summary: A fast, lazy-loading JSON viewer for Windows 11 built on tkinter
-Requires-Python: >=3.12
-Requires-Dist: sv-ttk>=2.6
-Requires-Dist: tkinterdnd2>=0.4
-Provides-Extra: dev
-Requires-Dist: pytest>=8; extra == "dev"
