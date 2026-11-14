@@ -91,10 +91,10 @@ class Session:
 
     def _set_icon(self) -> None:
         try:
-            if winapi.IS_WINDOWS and (ASSETS / "icon.ico").exists():
-                self.root.iconbitmap(default=str(ASSETS / "icon.ico"))
+            if winapi.IS_WINDOWS and (ASSETS / "icon2.ico").exists():
+                self.root.iconbitmap(default=str(ASSETS / "icon2.ico"))
             elif (ASSETS / "icon.png").exists():
-                self._icon_image = tk.PhotoImage(file=str(ASSETS / "icon.png"))
+                self._icon_image = tk.PhotoImage(file=str(ASSETS / "icon2.png"))
                 self.root.iconphoto(True, self._icon_image)
         except tk.TclError:
             pass
